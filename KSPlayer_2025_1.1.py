@@ -31,6 +31,21 @@ class VideoListWidget(QListWidget):
             if any(file_path.lower().endswith(ext) for ext in video_extensions):
                 self.addItem(file_path)
 
+        # MainWindow 메서드 직접 호출
+        if self.main_window:
+            self.main_window.handle_dropped_files(filepaths)
+            
+    def keyPressEvent(self, event):
+        if event.key() in [Qt.Key_Delete, Qt.Key_Backspace]:
+            # Get selected items
+            selected_items = self.selectedItems()
+            if selected_items:
+                # Remove selected items
+                for item in selected_items:
+                    self.takeItem(self.row(item))
+        else:
+            super().keyPressEvent(event)
+
 class CustomSlider(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -175,13 +190,16 @@ class MouseBehaviorAnalyzer(QMainWindow):
         self.file_list.dragEnterEvent = self.file_list_drag_enter_event
         self.file_list.dropEvent = self.file_list_drop_event
         
+        # Set up key press event for file list
+        self.file_list.keyPressEvent = self.file_list_key_press_event
+        
         load_btn = QPushButton("Load Files")
         load_btn.clicked.connect(self.load_files)
         
         left_layout.addWidget(load_btn)
         left_layout.addWidget(self.file_list)
         left_panel.setLayout(left_layout)
-        left_panel.setFixedWidth(200)
+        left_panel.setFixedWidth(300)
         
         # Center panel - Video display
         center_panel = QGroupBox("Video")
@@ -288,8 +306,11 @@ class MouseBehaviorAnalyzer(QMainWindow):
     def load_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Load Videos", "", 
                                               "Video Files (*.mp4 *.avi *.mov *.mkv *.wmv, *.mpg)")
-        self.file_list.addItems(files)
-        
+        for file in files:
+            # Check if file already exists in the list
+            if not any(self.file_list.item(i).text() == file for i in range(self.file_list.count())):
+                self.file_list.addItem(file)
+                
     def load_video(self, item):
         self.video_path = item.text()
         if self.cap is not None:
@@ -297,35 +318,66 @@ class MouseBehaviorAnalyzer(QMainWindow):
         self.cap = cv2.VideoCapture(self.video_path)
         self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # Initialize zone arrays for all mice
-        self.initialize_zone_arrays()
-        
-        # Update custom slider and annotation bar
-        self.custom_slider.set_frame_count(self.frame_count)
-        self.annotation_bar.set_frame_count(self.frame_count)
-        
         # Try to load existing CSV file from the same directory
         video_dir = os.path.dirname(self.video_path)
         video_name = os.path.splitext(os.path.basename(self.video_path))[0]
         csv_path = os.path.join(video_dir, f"{video_name}.csv")
         
         if os.path.exists(csv_path):
-            with open(csv_path, 'r') as csvfile:
-                reader = csv.reader(csvfile)
-                header = next(reader)  # Get header
-                mouse_columns = [i for i, col in enumerate(header) if col.startswith('Mouse')]
-                
-                for row in reader:
-                    if len(row) > 1:  # At least frame number and one mouse column
-                        frame_num = int(row[0])
-                        if frame_num < self.frame_count:
-                            for mouse_idx, col_idx in enumerate(mouse_columns):
-                                if col_idx < len(row):
-                                    zone = row[col_idx]
-                                    if zone == 'A':
-                                        self.zone_arrays[mouse_idx][frame_num] = 1
-                                    elif zone == 'B':
-                                        self.zone_arrays[mouse_idx][frame_num] = 2
+            try:
+                with open(csv_path, 'r') as csvfile:
+                    reader = csv.reader(csvfile)
+                    header = next(reader)  # Get header
+                    
+                    # Find mouse columns and determine number of mice in CSV
+                    mouse_columns = []
+                    for i, col in enumerate(header):
+                        if col.startswith('Mouse'):
+                            try:
+                                mouse_num = int(col.split(' ')[1])
+                                mouse_columns.append((i, mouse_num))
+                            except (IndexError, ValueError):
+                                continue
+                    
+                    if mouse_columns:
+                        # Sort by mouse number
+                        mouse_columns.sort(key=lambda x: x[1])
+                        max_mouse_num = mouse_columns[-1][1]
+                        
+                        # Update mouse count to match CSV file
+                        self.mouse_count = max_mouse_num
+                        self.mouse_count_combo.setCurrentText(str(max_mouse_num))
+                        
+                        # Initialize zone arrays with correct mouse count
+                        self.initialize_zone_arrays()
+                        
+                        # Read data
+                        for row in reader:
+                            if len(row) > 1:  # At least frame number and one mouse column
+                                try:
+                                    frame_num = int(row[0])
+                                    if 0 <= frame_num < self.frame_count:
+                                        for col_idx, mouse_num in mouse_columns:
+                                            if col_idx < len(row):
+                                                mouse_idx = mouse_num - 1  # Convert to 0-based index
+                                                zone = row[col_idx]
+                                                if zone == 'A':
+                                                    self.zone_arrays[mouse_idx][frame_num] = 1
+                                                elif zone == 'B':
+                                                    self.zone_arrays[mouse_idx][frame_num] = 2
+                                except ValueError:
+                                    continue
+            except Exception as e:
+                print(f"Error loading CSV file: {e}")
+                # If CSV loading fails, initialize with default mouse count
+                self.initialize_zone_arrays()
+        else:
+            # If no CSV file exists, initialize with default mouse count
+            self.initialize_zone_arrays()
+        
+        # Update custom slider and annotation bar
+        self.custom_slider.set_frame_count(self.frame_count)
+        self.annotation_bar.set_frame_count(self.frame_count)
         
         # Reset labels and update visualization
         self.update_zone_counts()
@@ -372,23 +424,23 @@ class MouseBehaviorAnalyzer(QMainWindow):
                 
                 # Draw current frame number and zone status
                 painter = QPainter(pixmap)
-                painter.setPen(QPen(Qt.white, 3))
+                painter.setPen(QPen(Qt.black, 2))  # Change to black color and thinner line
                 font = painter.font()
-                font.setPointSize(30)
+                font.setPointSize(20)  # Reduce font size
                 painter.setFont(font)
                 
                 # Draw frame number at the top
                 frame_text = f"Frame: {self.current_frame}"
-                painter.drawText(20, 40, frame_text)
+                painter.drawText(20, 30, frame_text)  # Adjust y position
                 
                 # Draw zone status below frame number
                 if self.current_frame < len(self.zone_arrays[self.current_mouse]):
                     if self.zone_arrays[self.current_mouse][self.current_frame - 1] == 1:
                         painter.setPen(QPen(Qt.red, 3))
-                        painter.drawText(20, 80, "ZONE A")
+                        painter.drawText(20, 60, "ZONE A")
                     elif self.zone_arrays[self.current_mouse][self.current_frame - 1] == 2:
                         painter.setPen(QPen(Qt.blue, 3))
-                        painter.drawText(20, 80, "ZONE B")
+                        painter.drawText(20, 60, "ZONE B")
                 
                 painter.end()
                 self.video_label.setPixmap(pixmap)
@@ -513,7 +565,9 @@ class MouseBehaviorAnalyzer(QMainWindow):
         for url in urls:
             file_path = url.toLocalFile()
             if any(file_path.lower().endswith(ext) for ext in video_extensions):
-                self.file_list.addItem(file_path)
+                # Check if file already exists in the list
+                if not any(self.file_list.item(i).text() == file_path for i in range(self.file_list.count())):
+                    self.file_list.addItem(file_path)
 
     def file_list_drag_enter_event(self, event):
         if event.mimeData().hasUrls():
@@ -526,7 +580,20 @@ class MouseBehaviorAnalyzer(QMainWindow):
         for url in urls:
             file_path = url.toLocalFile()
             if any(file_path.lower().endswith(ext) for ext in video_extensions):
-                self.file_list.addItem(file_path)
+                # Check if file already exists in the list
+                if not any(self.file_list.item(i).text() == file_path for i in range(self.file_list.count())):
+                    self.file_list.addItem(file_path)
+
+    def file_list_key_press_event(self, event):
+        if event.key() in [Qt.Key_Delete, Qt.Key_Backspace]:
+            # Get selected items
+            selected_items = self.file_list.selectedItems()
+            if selected_items:
+                # Remove selected items
+                for item in selected_items:
+                    self.file_list.takeItem(self.file_list.row(item))
+        else:
+            QListWidget.keyPressEvent(self.file_list, event)
 
     def save_results(self):
         if self.zone_arrays is None or self.video_path is None:
@@ -590,10 +657,33 @@ class MouseBehaviorAnalyzer(QMainWindow):
             self.toggle_delete_mode()
 
     def mouse_count_changed(self, count):
-        self.mouse_count = int(count)
-        self.update_mouse_selection()
+        new_mouse_count = int(count)
+        old_mouse_count = self.mouse_count
+        self.mouse_count = new_mouse_count
+        
+        # Save existing zone arrays if they exist
+        old_zone_arrays = None
         if self.zone_arrays is not None:
-            self.initialize_zone_arrays()
+            old_zone_arrays = self.zone_arrays.copy()
+            
+        # Update mouse selection UI
+        self.update_mouse_selection()
+        
+        # Initialize new zone arrays
+        if self.frame_count > 0:
+            self.zone_arrays = [np.zeros(self.frame_count + 1, dtype=np.int8) for _ in range(self.mouse_count)]
+            
+            # Copy over existing data if we had previous arrays
+            if old_zone_arrays is not None:
+                # Copy data for mice that existed in both old and new counts
+                copy_count = min(old_mouse_count, new_mouse_count)
+                for i in range(copy_count):
+                    if i < len(old_zone_arrays) and i < len(self.zone_arrays):
+                        self.zone_arrays[i] = old_zone_arrays[i].copy()
+            
+            # Update the annotation bar with current mouse's data
+            if self.current_mouse < len(self.zone_arrays):
+                self.annotation_bar.set_zone_array(self.zone_arrays[self.current_mouse])
             
     def update_mouse_selection(self):
         self.mouse_select_combo.clear()
