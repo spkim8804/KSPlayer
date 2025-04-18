@@ -30,10 +30,6 @@ class VideoListWidget(QListWidget):
             file_path = url.toLocalFile()
             if any(file_path.lower().endswith(ext) for ext in video_extensions):
                 self.addItem(file_path)
-
-        # MainWindow 메서드 직접 호출
-        if self.main_window:
-            self.main_window.handle_dropped_files(filepaths)
             
     def keyPressEvent(self, event):
         if event.key() in [Qt.Key_Delete, Qt.Key_Backspace]:
